@@ -1,0 +1,1251 @@
+{
+    "AWSTemplateFormatVersion": "2010-09-09",
+    "Description": "",
+    "Parameters": {
+      "BaseImage": {
+        "Type": "String",
+        "Default": "ami-005973cfb88e3d3af",
+        "AllowedValues": [
+          "ami-005973cfb88e3d3af"
+        ]
+      },
+      "KeyName": {
+        "Description": "",
+        "Type": "AWS::EC2::KeyPair::KeyName",
+        "ConstraintDescription": "must be the name of an existing EC2 KeyPair."
+      },
+      "AvailabilityZone": {
+        "Description": "",
+        "Type": "AWS::EC2::AvailabilityZone::Name"
+      },
+      "InstanceTypeRW": {
+        "Description": "PostgreSQL EC2 instance type",
+        "Type": "String",
+        "AllowedValues": [
+          "r5a.2xlarge",
+          "r5a.xlarge",
+          "t3a.medium"
+        ],
+        "ConstraintDescription": "must be a valid EC2 instance type."
+      },
+      "InstanceTypeRO": {
+        "Description": "PostgreSQL EC2 instance type",
+        "Type": "String",
+        "Default": "not_set",
+        "AllowedValues": [
+          "not_set",
+          "i3en.2xlarge",
+          "i3en.xlarge"
+        ],
+        "ConstraintDescription": "must be a valid EC2 instance type."
+      },
+      "SSHLocation": {
+        "Description": " The IP address range that can be used to SSH to the EC2 instances",
+        "Type": "String",
+        "MinLength": "9",
+        "MaxLength": "18",
+        "Default": "0.0.0.0/0",
+        "AllowedPattern": "(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})/(\\d{1,2})",
+        "ConstraintDescription": "must be a valid IP CIDR range of the form x.x.x.x/x."
+      },
+      "DBPassword": {
+        "NoEcho": "true",
+        "Description": "DB Password for postgres and repuser users",
+        "Type": "String",
+        "MinLength": "1",
+        "MaxLength": "41",
+        "AllowedPattern": "[a-zA-Z0-9]*",
+        "ConstraintDescription": "must contain only alphanumeric characters."
+      }
+    },
+    "Mappings": {
+      "HugePages": {
+        "r5a.2xlarge": {
+          "nPages": "16000"
+        },
+        "r5a.xlarge": {
+          "nPages": "8000"
+        },
+        "t3a.medium": {
+          "nPages": "1500"
+        },
+        "i3en.2xlarge": {
+          "nPages": "16000"
+        },
+        "i3en.xlarge": {
+          "nPages": "8000"
+        }
+      }
+    },
+    "Conditions": {
+      "ConditionsDeployRO": {
+        "Fn::Not": [
+          {
+            "Fn::Equals": [
+              {
+                "Ref": "InstanceTypeRO"
+              },
+              "not_set"
+            ]
+          }
+        ]
+      }
+    },
+    "Resources": {
+      "InstanceProfile": {
+        "Type": "AWS::IAM::InstanceProfile",
+        "Properties": {
+          "Path": "/",
+          "Roles": [
+            "EC2_S3_Role"
+          ]
+        }
+      },
+      "SG": {
+        "Type": "AWS::EC2::SecurityGroup",
+        "Properties": {
+          "GroupDescription": "Enable SSH and replication",
+          "VpcId": "vpc-5de9c836"          
+        }
+      },
+      "SGinSelfPG": {
+        "Type": "AWS::EC2::SecurityGroupIngress",
+        "DependsOn": "SG",
+        "Properties": {
+          "GroupId": { "Ref": "SG" },
+          "IpProtocol": "tcp",
+          "FromPort": "5432",
+          "ToPort": "5432",
+          "SourceSecurityGroupId": { "Ref": "SG" } 
+        }       
+      },
+      "SGinPG": {
+        "Type": "AWS::EC2::SecurityGroupIngress",
+        "DependsOn": "SG",
+        "Properties": {
+          "GroupId": { "Ref": "SG" },
+          "IpProtocol": "tcp",
+          "FromPort": "5432",
+          "ToPort": "5432",
+          "CidrIp": { "Ref": "SSHLocation" }
+        }
+      },
+      "SGinSSH": {
+        "Type": "AWS::EC2::SecurityGroupIngress",
+        "DependsOn": "SG",
+        "Properties": {
+          "GroupId": { "Ref": "SG" },
+          "IpProtocol": "tcp",
+          "FromPort": "22",
+          "ToPort": "22",
+          "CidrIp": { "Ref": "SSHLocation" }
+        }
+      },
+      "PsqlServer": {
+        "Type": "AWS::EC2::Instance",
+        "Metadata": {
+          "AWS::CloudFormation::Authentication": {
+            "S3AccessCreds": {
+              "type": "S3",
+              "roleName": "EC2_S3_Role",
+              "buckets": [
+                "cf-pg-configs",
+                "cf-pg-backups"
+              ]
+            }
+          },
+          "AWS::CloudFormation::Init": {
+            "configSets": {
+              "InstallAndRun": [
+                "Install"
+              ],
+              "Configs": [
+                "configFiles",
+                "setPassword",
+                "setupBackup",
+                "restartPG",
+                "push1stBackup"
+              ]
+            },
+            "Install": {
+              "packages": {
+                "yum": {
+                  "htop": []
+                }
+              },
+              "commands": {
+                "00_command": {
+                  "command": "/sbin/modprobe zfs"
+                },
+                "01_command": {
+                  "command": "zpool create -o ashift=9 pgtank nvme1n1 nvme2n1"
+                },
+                "02_command": {
+                  "command": "zfs set compression=lz4 pgtank && zfs set atime=off pgtank && zfs set relatime=on pgtank && zfs set xattr=sa pgtank && zfs set recordsize=128K pgtank && zfs set primarycache=all pgtank"
+                },
+                "03_command": {
+                  "command": "zfs create pgtank/db"
+                },
+                "04_command": {
+                  "command": "mkdir /pgtank/db/postgres"
+                },
+                "05_command": {
+                  "command": "chown postgres:postgres /pgtank/db/postgres"
+                },
+                "06_command": {
+                  "command": "mkdir /backup_scripts && chown postgres:postgres /backup_scripts "
+                },
+                "07_command": {
+                  "command": "runuser -l postgres -c 'initdb -D /pgtank/db/postgres'"
+                },
+                "08_command": {
+                  "command": "echo vm.nr_hugepages=$PAGE_N | tee -a /etc/sysctl.conf",
+                  "env": {
+                    "PAGE_N": {
+                      "Fn::FindInMap": [
+                        "HugePages",
+                        {
+                          "Ref": "InstanceTypeRW"
+                        },
+                        "nPages"
+                      ]
+                    }
+                  }
+                },
+                "09_command":{
+                  "command": "sysctl -p /etc/sysctl.conf"
+                },
+                "10_command": {
+                  "command": {
+                    "Fn::Join": [
+                      "",
+                      [
+                        "sudo hostnamectl set-hostname ",
+                        {
+                          "Ref": "AWS::StackName"
+                        },
+                        "-rw.myapp.local"
+                      ]
+                    ]
+                  }
+                }
+              },
+              "services": {
+                "sysvinit": {
+                  "cfn-hup": {
+                    "enabled": "true",
+                    "ensureRunning": "true",
+                    "files": [
+                      "/etc/cfn/cfn-hup.conf",
+                      "/etc/cfn/hooks.d/cfn-auto-reloader.conf"
+                    ]
+                  }
+                }
+              },
+              "files": {
+                "/etc/cfn/cfn-hup.conf": {
+                  "content": {
+                    "Fn::Join": [
+                      "",
+                      [
+                        "[main]\n",
+                        "stack=",
+                        {
+                          "Ref": "AWS::StackId"
+                        },
+                        "\n",
+                        "region=",
+                        {
+                          "Ref": "AWS::Region"
+                        },
+                        "\n",
+                        "verbose=true\n",
+                        "interval=5\n"
+                      ]
+                    ]
+                  },
+                  "mode": "000400",
+                  "owner": "root",
+                  "group": "root"
+                },
+                "/etc/cfn/hooks.d/cfn-auto-reloader.conf": {
+                  "content": {
+                    "Fn::Join": [
+                      "",
+                      [
+                        "[cfn-auto-reloader-hook]\n",
+                        "triggers=post.update\n",
+                        "path=Resources.PsqlServer.Metadata.AWS::CloudFormation::Init\n",
+                        "action=/opt/aws/bin/cfn-init -v ",
+                        "         --stack ",
+                        {
+                          "Ref": "AWS::StackName"
+                        },
+                        "         --resource PsqlServer ",
+                        "         --configsets Configs ",
+                        "         --region ",
+                        {
+                          "Ref": "AWS::Region"
+                        },
+                        "\n",
+                        "runas=root\n"
+                      ]
+                    ]
+                  },
+                  "mode": "000400",
+                  "owner": "root",
+                  "group": "root"
+                }
+              }
+            },
+            "configFiles": {
+              "services": {
+                "systemd": {
+                  "postgresql": {
+                    "enabled": "true",
+                    "ensureRunning": "true"
+                  }
+                }
+              },
+              "files": {
+                "/pgtank/db/postgres/pg_hba.conf": {
+                  "mode": "000755",
+                  "owner": "postgres",
+                  "group": "postgres",
+                  "content": {
+                    "Fn::Join": [
+                      "",
+                      [
+                        "local   all             all                                     trust\n",
+                        "host    all             all             127.0.0.1/32            trust\n",
+                        "host    all             all              0.0.0.0/0              scram-sha-256\n",
+                        "host    all             all             ::1/128                 trust\n",
+                        "local   replication     all                                     trust\n",
+                        "host    replication     all             127.0.0.1/32            trust\n",
+                        "host    replication     all             ::1/128                 trust\n"
+                      ]
+                    ]
+                  }
+                },
+                "/pgtank/db/postgres/postgresql.conf": {
+                  "mode": "000755",
+                  "owner": "postgres",
+                  "group": "postgres",
+                  "source": {
+                    "Fn::Join": [
+                      "",
+                      [
+                        "https://cf-pg-configs.s3.us-west-2.amazonaws.com/rw/",
+                        {
+                          "Ref": "InstanceTypeRW"
+                        },
+                        ".conf"
+                      ]
+                    ]
+                  },
+                  "authentication": "S3AccessCreds"
+                },
+                "/usr/lib/systemd/system/postgresql.service": {
+                  "mode": "000755",
+                  "owner": "postgres",
+                  "group": "postgres",
+                  "content": {
+                    "Fn::Join": [
+                      "",
+                      [
+                        "[Unit]\n",
+                        "Description=PostgreSQL database server\n",
+                        "After=network.target\n",
+                        "\n",
+                        "[Service]\n",
+                        "Type=notify\n",
+                        "\n",
+                        "User=postgres\n",
+                        "Group=postgres\n",
+                        "\n",
+                        "# Where to send early-startup messages from the server (before the logging\n",
+                        "# options of postgresql.conf take effect)\n",
+                        "# This is normally controlled by the global default set by systemd\n",
+                        "# StandardOutput=syslog\n",
+                        "\n",
+                        "# Disable OOM kill on the postmaster\n",
+                        "OOMScoreAdjust=-1000\n",
+                        "# ... but allow it still to be effective for child processes\n",
+                        "#   (note that these settings are ignored by Postgres releases before 9.5)\n",
+                        "Environment=PG_OOM_ADJUST_FILE=/proc/self/oom_score_adj\n",
+                        "Environment=PG_OOM_ADJUST_VALUE=0\n",
+                        "\n",
+                        "Environment=PGDATA=/pgtank/db/postgres\n",
+                        "\n",
+                        "ExecStartPre=/usr/libexec/postgresql-check-db-dir %N\n",
+                        "# Even though the $PGDATA variable is exported (postmaster would accept that)\n",
+                        "# use the -D option here so PGDATA content is printed by /bin/ps and by\n",
+                        "# 'systemctl status'.\n",
+                        "ExecStart=/usr/bin/postmaster -D ${PGDATA}\n",
+                        "ExecReload=/bin/kill -HUP $MAINPID\n",
+                        "KillMode=mixed\n",
+                        "KillSignal=SIGINT\n",
+                        "\n",
+                        "# No artificial start/stop timeout.\n",
+                        "TimeoutSec=0\n",
+                        "\n",
+                        "[Install]\n",
+                        "WantedBy=multi-user.target\n"
+                      ]
+                    ]
+                  }
+                },
+                "/backup_scripts/push-backup.sh": {
+                  "mode": "000755",
+                  "content": {
+                    "Fn::Join": [
+                      "",
+                      [
+                        "#!/bin/sh\n",
+                        "export PGHOST=/var/run/postgresql\n",
+                        "export PGUSER=postgres\n",
+                        "export WALG_S3_PREFIX=s3://cf-pg-backups/",
+                        {
+                          "Ref": "AWS::StackName"
+                        },
+                        "\nexport WALG_COMPRESSION_METHOD=brotli\n",
+                        "/usr/local/bin/wal-g backup-push /pgtank/db/postgres\n",
+                        "/usr/local/bin/wal-g delete --confirm retain FULL 2\n"
+                      ]
+                    ]
+                  }
+                },
+                "/backup_scripts/poll-pg_hba_update.sh": {
+                  "mode": "000755",
+                  "content": {                   
+                    "Fn::Join": [
+                      "",
+                      [
+                        "#!/bin/sh -xe\n",
+                        "STACK_NAME='",
+                        {
+                          "Ref": "AWS::StackName"
+                        },
+                        "'\n",
+                        "LAST_IP_FILE='/backup_scripts/last_replica_ip.txt'\n",
+                        "REPLICA_IP=$(aws cloudformation describe-stacks --stack-name $STACK_NAME --region us-west-2 ",
+                        "--query \"Stacks[0].Outputs[?OutputKey=='PsqlServerROIP'].OutputValue\" --output text)\n",
+                        "if [ \"$REPLICA_IP\" = \"None\" ]; then\n",
+                        "    echo \"Replica IP not available yet.\"\n",
+                        "    exit 1\n",
+                        "fi\n",
+                        "if [ -f \"$LAST_IP_FILE\" ]; then\n",
+                        "    LAST_IP=$(cat \"$LAST_IP_FILE\")\n",
+                        "else\n",
+                        "    LAST_IP=\"\"\n",
+                        "fi\n",
+                        "if [ \"$REPLICA_IP\" != \"$LAST_IP\" ]; then\n",
+                        "    echo \"Updating pg_hba.conf with new replica IP: $REPLICA_IP\"\n",
+                        "    cp /pgtank/db/postgres/pg_hba.conf /pgtank/db/postgres/pg_hba.conf.bak\n",
+                        "    echo \"host replication repuser $REPLICA_IP/32 scram-sha-256\" >> /pgtank/db/postgres/pg_hba.conf\n",
+                        "    psql -c \"SELECT pg_reload_conf();\"\n",
+                        "    echo \"$REPLICA_IP\" > \"$LAST_IP_FILE\"\n",
+                        "else\n",
+                        "    echo \"Replica IP has not changed.\"\n",
+                        "fi\n"
+                      ]
+                    ]                    
+                  }
+                }
+              }
+            },
+            "setPassword": {
+              "commands": {
+                "set_password": {
+                  "command": {
+                    "Fn::Join": [
+                      "",
+                      [
+                        "psql -U postgres -c \"ALTER USER postgres with PASSWORD '",
+                        {
+                          "Ref": "DBPassword"
+                        },
+                        "';\""
+                      ]
+                    ]
+                  }
+                }
+              }
+            },
+            "restartPG": {
+              "commands": {
+                "restart": {
+                  "command": "systemctl restart postgresql"
+                }
+                
+              }
+            },
+            "push1stBackup": {
+              "commands": {
+               
+                "pushBackup": {
+                  "command": "runuser -l postgres -c '/backup_scripts/push-backup.sh'"
+                }
+                
+              }
+            },
+            "setupBackup": {
+              "commands": {
+                "00_command": {
+                  "command": "chmod u+x /backup_scripts/push-backup.sh"
+                },
+                "01_command": {
+                  "command": "runuser -l postgres -c 'psql -U postgres -c \"CREATE EXTENSION plpython3u\" -d postgres'"
+                },
+                "02_command": {
+                  "command": "runuser -l postgres -c 'psql -U postgres -c \"CREATE EXTENSION aws_s3\" -d postgres'"
+                },
+                "03_command": {
+                  "command": "echo \"archive_command = 'WALG_S3_PREFIX=s3://cf-pg-backups/$BUCKUP_FOLDER wal-g wal-push %p'\" >> /pgtank/db/postgres/postgresql.conf",
+                  "env": {
+                    "BUCKUP_FOLDER": {
+                      "Ref": "AWS::StackName"
+                    }
+                  }
+                },
+                "04_cron1_command": {
+                  "command": "echo \"0 4 * * * /backup_scripts/push-backup.sh &> /backup_scripts/push-backup.log\" >> /var/spool/cron/postgres"
+                },
+                "04_cron2_command": {
+                  "command": "echo \"*/5 * * * * /home/ec2-user/aws-scripts-mon/mon-put-instance-data.pl --mem-util --mem-used --disk-space-util --disk-path=/ --disk-path=/pgtank/db --from-cron\" >> /var/spool/cron/ec2-user"
+                },
+                "05_command": {
+                  "command": "sudo -u postgres createuser -U postgres repuser -c 5 --replication -w"
+                }               
+                "set_repuser_password": {
+                  "command": {
+                    "Fn::Join": [
+                      "",
+                      [
+                        "psql -U postgres -c \"ALTER USER repuser with PASSWORD '",
+                        {
+                          "Ref": "DBPassword"
+                        },
+                        "';\""
+                      ]
+                    ]
+                  }
+                },
+                "update_replica_ip_pg_hba_polling": {
+                  "command": "echo \"*/5 * * * * /backup_scripts/poll-pg_hba_update.sh >> /backup_scripts/poll-pg_hba_update.log 2>&1\" >> /var/spool/cron/postgres"
+                } 
+                  
+              }
+            }
+          }
+        },
+        "Properties": {
+          "IamInstanceProfile": {
+            "Ref": "InstanceProfile"
+          },
+          "Tags": [
+            {
+              "Key": "Name",
+              "Value": {
+                "Fn::Join": [
+                  "",
+                  [
+                    {
+                      "Ref": "AWS::StackName"
+                    },
+                    "-rw"
+                  ]
+                ]
+              }
+            }
+          ],
+          "AvailabilityZone": {
+            "Ref": "AvailabilityZone"
+          },
+          "ImageId": {
+            "Ref": "BaseImage"
+          },
+          "InstanceType": {
+            "Ref": "InstanceTypeRW"
+          },
+          "BlockDeviceMappings": [
+            {
+              "DeviceName": "/dev/xvda",
+              "Ebs": {
+                "VolumeType": "gp3",
+                "VolumeSize": "30",
+                "DeleteOnTermination": "true"
+              }
+            }
+          ],
+          "SecurityGroupIds": [
+            {
+              "Ref": "SG"
+            },
+            "sg-0055ac66"
+          ],
+          "Volumes": [
+            {
+              "Device": "/dev/sdf",
+              "VolumeId": {
+                "Ref": "disk1"
+              }
+            },
+            {
+              "Device": "/dev/sdh",
+              "VolumeId": {
+                "Ref": "disk2"
+              }
+            }
+          ],
+          "KeyName": {
+            "Ref": "KeyName"
+          },
+          "UserData": {
+            "Fn::Base64": {
+              "Fn::Join": [
+                "",
+                [
+                  "#!/bin/bash -xe\n",
+                  "yum install -y aws-cfn-bootstrap\n",
+                  "# Install the files and packages from the metadata\n",
+                  "/opt/aws/bin/cfn-init -v ",
+                  "         --stack ",
+                  {
+                    "Ref": "AWS::StackName"
+                  },
+                  "         --resource PsqlServer ",
+                  "         --configsets InstallAndRun,Configs ",
+                  "         --region ",
+                  {
+                    "Ref": "AWS::Region"
+                  },
+                  "\n",
+                  "# Signal the status from cfn-init\n",
+                  "/opt/aws/bin/cfn-signal -e $? ",
+                  "         --stack ",
+                  {
+                    "Ref": "AWS::StackName"
+                  },
+                  "         --resource PsqlServer ",
+                  "         --region ",
+                  {
+                    "Ref": "AWS::Region"
+                  },
+                  "\n"
+                ]
+              ]
+            }
+          }
+        },
+        "CreationPolicy": {
+          "ResourceSignal": {
+            "Timeout": "PT10M"
+          }
+        }
+      },
+      "PsqlServerPgTankAlarm": {
+        "Type": "AWS::CloudWatch::Alarm",
+        "Properties": {
+          "AlarmName": {
+            "Fn::Join": [
+              "",
+              [
+                { "Ref": "AWS::StackName" },
+                "-RW-PGTANK-",
+                { "Ref": "PsqlServer" }
+              ]
+            ]
+          },
+          "Namespace": "System/Linux",
+          "MetricName": "DiskSpaceUtilization",
+          "Dimensions": [
+            {
+              "Name": "InstanceId",
+              "Value": { "Ref": "PsqlServer" }
+            },
+            {
+              "Name": "MountPath",
+              "Value": "/pgtank/db"
+            },
+            {
+              "Name": "Filesystem",
+              "Value": "pgtank/db"
+            }
+          ],
+          "Statistic": "Average",
+          "Period": 300,
+          "EvaluationPeriods": 1,
+          "Threshold": 80,
+          "ComparisonOperator": "GreaterThanThreshold",
+          "AlarmActions": [
+            "arn:aws:sns:us-west-2:528107429540:PGrds"
+          ],
+          "TreatMissingData": "missing"
+        }
+      },
+      "PsqlServerRO": {
+        "Type": "AWS::EC2::Instance",
+        "Condition": "ConditionsDeployRO",
+        "Metadata": {
+          "AWS::CloudFormation::Authentication": {
+            "S3AccessCreds": {
+              "type": "S3",
+              "roleName": "EC2_S3_Role",
+              "buckets": [
+                "cf-pg-configs",
+                "cf-pg-backups"
+              ]
+            }
+          },
+          "AWS::CloudFormation::Init": {
+            "configSets": {
+              "InstallAndRun": [
+                "Install"
+              ],
+              "Configs": [
+                "configFiles",
+                "restartPG"
+              ]
+            },
+            "Install": {
+              "packages": {
+                "yum": {
+                  "htop": []
+                }
+              },
+              "commands": {
+                "00_command": {
+                  "command": "/sbin/modprobe zfs"
+                },
+                "01_command": {
+                  "command": "./backup_scripts/zpool-nvme.sh"
+                },
+                "02_command": {
+                  "command": "zfs set compression=lz4 pgtank && zfs set atime=off pgtank && zfs set relatime=on pgtank && zfs set xattr=sa pgtank && zfs set recordsize=128K pgtank && zfs set primarycache=all pgtank"
+                },
+                "03_command": {
+                  "command": "zfs create pgtank/db"
+                },
+                "06_command": {
+                  "command": "mkdir /pgtank/db/postgres"
+                },
+                "07_command": {
+                  "command": "chown postgres:postgres /pgtank/db/postgres"
+                },
+                "08_command": {
+                  "command": "WALG_S3_PREFIX=s3://cf-pg-backups/$BUCKUP_FOLDER wal-g backup-fetch /pgtank/db/postgres LATEST",
+                  "env": {
+                    "BUCKUP_FOLDER": {
+                      "Ref": "AWS::StackName"
+                    }
+                  }
+                },
+                "09_command": {
+                  "command": "aws s3 cp s3://cf-pg-configs/ro/${INSTANCE_TYPE_RO}.conf /pgtank/db/postgres/postgresql.conf && chown postgres:postgres /pgtank/db/postgres/postgresql.conf",
+                  "env": {
+                    "INSTANCE_TYPE_RO": {"Ref": "InstanceTypeRO"},
+                    "AWS_DEFAULT_REGION": {"Ref": "AWS::Region"}
+                  }
+                }
+                ,
+                "10_command": {
+                  "command": "echo \"restore_command = 'WALG_S3_PREFIX=s3://cf-pg-backups/$BUCKUP_FOLDER wal-g wal-fetch \"%f\" \"%p\"'\" >> /pgtank/db/postgres/postgresql.conf",   
+                  "env": {
+                    "BUCKUP_FOLDER": {
+                      "Ref": "AWS::StackName"
+                    }
+                  }
+                },
+                "11_command": {
+                  "command": "touch /pgtank/db/postgres/standby.signal"
+                },
+                "12_command": {
+                  "command": "echo \"primary_conninfo = 'host=$MASTER_IP port=5432 user=repuser password=$DB_PASS'\" >> /pgtank/db/postgres/postgresql.conf",
+                  "env": {
+                    "BUCKUP_FOLDER": {
+                      "Ref": "AWS::StackName"
+                    },
+                    "MASTER_IP": {
+                      "Fn::GetAtt": [
+                        "PsqlServer",
+                        "PrivateIp"
+                      ]
+                    },
+                    "DB_PASS": {
+                      "Ref": "DBPassword"
+                    }
+                  }
+                },
+                "13_command": {
+                  "command": "chown -R postgres:postgres /pgtank/db/postgres/"
+                },
+                "14_command": {
+                  "command": "echo vm.nr_hugepages=$PAGE_N | tee -a /etc/sysctl.conf",
+                  "env": {
+                    "PAGE_N": {
+                      "Fn::FindInMap": [
+                        "HugePages",
+                        {
+                          "Ref": "InstanceTypeRW"
+                        },
+                        "nPages"
+                      ]
+                    }
+                  }
+                },
+                "15_command":{
+                  "command": "sysctl -p /etc/sysctl.conf"
+                },
+                "16_command": {
+                  "command": {
+                    "Fn::Join": [
+                      "",
+                      [
+                        "sudo hostnamectl set-hostname ",
+                        {
+                          "Ref": "AWS::StackName"
+                        },
+                        "-ro.myapp.local"
+                      ]
+                    ]
+                  }
+                }
+              },
+              "services": {
+                "sysvinit": {
+                  "cfn-hup": {
+                    "enabled": "true",
+                    "ensureRunning": "true",
+                    "files": [
+                      "/etc/cfn/cfn-hup.conf",
+                      "/etc/cfn/hooks.d/cfn-auto-reloader.conf"
+                    ]
+                  }
+                }
+              },
+              "files": {
+                "/etc/cfn/cfn-hup.conf": {
+                  "content": {
+                    "Fn::Join": [
+                      "",
+                      [
+                        "[main]\n",
+                        "stack=",
+                        {
+                          "Ref": "AWS::StackId"
+                        },
+                        "\n",
+                        "region=",
+                        {
+                          "Ref": "AWS::Region"
+                        },
+                        "\n",
+                        "verbose=true\n",
+                        "interval=5\n"
+                      ]
+                    ]
+                  },
+                  "mode": "000400",
+                  "owner": "root",
+                  "group": "root"
+                },
+                "/etc/cfn/hooks.d/cfn-auto-reloader.conf": {
+                  "content": {
+                    "Fn::Join": [
+                      "",
+                      [
+                        "[cfn-auto-reloader-hook]\n",
+                        "triggers=post.update\n",
+                        "path=Resources.PsqlServerRO.Metadata.AWS::CloudFormation::Init\n",
+                        "action=/opt/aws/bin/cfn-init -v ",
+                        "         --stack ",
+                        {
+                          "Ref": "AWS::StackName"
+                        },
+                        "         --resource PsqlServerRO ",
+                        "         --configsets Configs ",
+                        "         --region ",
+                        {
+                          "Ref": "AWS::Region"
+                        },
+                        "\n",
+                        "runas=root\n"
+                      ]
+                    ]
+                  },
+                  "mode": "000400",
+                  "owner": "root",
+                  "group": "root"
+                },
+                "/backup_scripts/zpool-nvme.sh": {
+                    "content": {
+                      "Fn::Join": [
+                        "",
+                        [
+                          "#!/bin/bash\n",
+                          "declare -a DRIVE_NAMES\n",
+                          "while IFS= read -r line; do\n",
+                          "  drive=$(echo \"$line\" | awk '{print $1}' | sed 's|/dev/||')\n",
+                          "  DRIVE_NAMES+=(\"$drive\")\n",
+                          "done < <(sudo nvme list | grep \"NVMe Instance Storage\")\n",
+                          "if [ ${#DRIVE_NAMES[@]} -eq 0 ]; then\n",
+                          "  echo \"No NVMe instance storage drives found.\"\n",
+                          "  exit 1\n",
+                          "fi\n",
+                          "DRIVE_LIST=\"\"\n",
+                          "for drive in \"${DRIVE_NAMES[@]}\"; do\n",
+                          "  DRIVE_LIST+=\"$drive \"\n",
+                          "done\n",
+                          "DRIVE_LIST=$(echo $DRIVE_LIST | xargs)\n",
+                          "sudo zpool create -o ashift=9 pgtank $DRIVE_LIST\n",
+                          "echo \"ZFS pool 'pgtank' created with drives: $DRIVE_LIST\"\n"
+                        ]
+                      ]
+                    },
+                    "mode": "000700",
+                    "owner": "root",
+                    "group": "root"
+                  }
+              }
+            },
+            "configFiles": {
+              "services": {
+                "systemd": {
+                  "postgresql": {
+                    "enabled": "true",
+                    "ensureRunning": "true"
+                  }
+                }
+              },
+              "files": {
+                "/pgtank/db/postgres/pg_hba.conf": {
+                  "mode": "000755",
+                  "owner": "postgres",
+                  "group": "postgres",
+                  "content": {
+                    "Fn::Join": [
+                      "",
+                      [
+                        "local   all             all                                     trust\n",
+                        "host    all             all             127.0.0.1/32            trust\n",
+                        "host    all             all              0.0.0.0/0              scram-sha-256\n",
+                        "host    all             all             ::1/128                 trust\n",
+                        "local   replication     all                                     trust\n",
+                        "host    replication     all             127.0.0.1/32            trust\n",
+                        "host    replication     all             ::1/128                 trust\n"
+                      ]
+                    ]
+                  }
+                },
+                "/usr/lib/systemd/system/postgresql.service": {
+                  "content": {
+                    "Fn::Join": [
+                      "",
+                      [
+                        "[Unit]\n",
+                        "Description=PostgreSQL database server\n",
+                        "After=network.target\n",
+                        "\n",
+                        "[Service]\n",
+                        "Type=notify\n",
+                        "\n",
+                        "User=postgres\n",
+                        "Group=postgres\n",
+                        "\n",
+                        "# Where to send early-startup messages from the server (before the logging\n",
+                        "# options of postgresql.conf take effect)\n",
+                        "# This is normally controlled by the global default set by systemd\n",
+                        "# StandardOutput=syslog\n",
+                        "\n",
+                        "# Disable OOM kill on the postmaster\n",
+                        "OOMScoreAdjust=-1000\n",
+                        "# ... but allow it still to be effective for child processes\n",
+                        "#   (note that these settings are ignored by Postgres releases before 9.5)\n",
+                        "Environment=PG_OOM_ADJUST_FILE=/proc/self/oom_score_adj\n",
+                        "Environment=PG_OOM_ADJUST_VALUE=0\n",
+                        "\n",
+                        "Environment=PGDATA=/pgtank/db/postgres\n",
+                        "\n",
+                        "ExecStartPre=/usr/libexec/postgresql-check-db-dir %N\n",
+                        "# Even though the $PGDATA variable is exported (postmaster would accept that)\n",
+                        "# use the -D option here so PGDATA content is printed by /bin/ps and by\n",
+                        "# 'systemctl status'.\n",
+                        "ExecStart=/usr/bin/postmaster -D ${PGDATA}\n",
+                        "ExecReload=/bin/kill -HUP $MAINPID\n",
+                        "KillMode=mixed\n",
+                        "KillSignal=SIGINT\n",
+                        "\n",
+                        "# No artificial start/stop timeout.\n",
+                        "TimeoutSec=0\n",
+                        "\n",
+                        "[Install]\n",
+                        "WantedBy=multi-user.target\n"
+                      ]
+                    ]
+                  }
+                }
+              }
+            },
+            "restartPG": {
+              "commands": {
+                "01_command": {
+                  "command": "systemctl restart postgresql"
+                }                
+              }
+            }
+          }
+        },
+        "Properties": {
+          "IamInstanceProfile": {
+            "Ref": "InstanceProfile"
+          },
+          "Tags": [
+            {
+              "Key": "Name",
+              "Value": {
+                "Fn::Join": [
+                  "",
+                  [
+                    {
+                      "Ref": "AWS::StackName"
+                    },
+                    "-ro"
+                  ]
+                ]
+              }
+            }
+          ],
+          "AvailabilityZone": {
+            "Ref": "AvailabilityZone"
+          },
+          "ImageId": {
+            "Ref": "BaseImage"
+          },
+          "InstanceType": {
+            "Ref": "InstanceTypeRO"
+          },
+          "SecurityGroupIds": [
+            {
+              "Ref": "SG"
+            },
+            "sg-0055ac66"
+          ],
+          "KeyName": {
+            "Ref": "KeyName"
+          },
+          "UserData": {
+            "Fn::Base64": {
+              "Fn::Join": [
+                "",
+                [
+                  "#!/bin/bash -xe\n",
+                  "yum install -y aws-cfn-bootstrap\n",
+                  "# Install the files and packages from the metadata\n",
+                  "/opt/aws/bin/cfn-init -v ",
+                  "         --stack ",
+                  {
+                    "Ref": "AWS::StackName"
+                  },
+                  "         --resource PsqlServerRO ",
+                  "         --configsets InstallAndRun,Configs ",
+                  "         --region ",
+                  {
+                    "Ref": "AWS::Region"
+                  },
+                  "\n",
+                  "# Signal the status from cfn-init\n",
+                  "/opt/aws/bin/cfn-signal -e $? ",
+                  "         --stack ",
+                  {
+                    "Ref": "AWS::StackName"
+                  },
+                  "         --resource PsqlServerRO ",
+                  "         --region ",
+                  {
+                    "Ref": "AWS::Region"
+                  },
+                  "\n"
+                ]
+              ]
+            }
+          }
+        },
+        "CreationPolicy": {
+          "ResourceSignal": {
+            "Timeout": "PT10M"
+          }
+        }
+      },
+      "PsqlServerROPgTankAlarm": {
+        "Type": "AWS::CloudWatch::Alarm",
+        "Condition": "ConditionsDeployRO",
+        "Properties": {
+          "AlarmName": {
+            "Fn::Join": [
+              "",
+              [
+                { "Ref": "AWS::StackName" },
+                "-RO-PGTANK-",
+                { "Ref": "PsqlServerRO" }
+              ]
+            ]
+          },
+          "Namespace": "System/Linux",
+          "MetricName": "DiskSpaceUtilization",
+          "Dimensions": [
+            {
+              "Name": "InstanceId",
+              "Value": { "Ref": "PsqlServerRO" }
+            },
+            {
+              "Name": "MountPath",
+              "Value": "/pgtank/db"
+            },
+            {
+              "Name": "Filesystem",
+              "Value": "pgtank/db"
+            }
+          ],
+          "Statistic": "Average",
+          "Period": 300,
+          "EvaluationPeriods": 1,
+          "Threshold": 80,
+          "ComparisonOperator": "GreaterThanThreshold",
+          "AlarmActions": [
+            "arn:aws:sns:us-west-2:528107429540:PGrds"
+          ],
+          "TreatMissingData": "missing"
+        }
+      },
+    
+      "disk1": {
+        "Type": "AWS::EC2::Volume",
+        "Properties": {
+          "Tags": [
+            {
+              "Key": "Name",
+              "Value": {
+                "Fn::Join": [
+                  "",
+                  [
+                    {
+                      "Ref": "AWS::StackName"
+                    },
+                    "-disk1"
+                  ]
+                ]
+              }
+            }
+          ],
+          "Size": 30,
+          "VolumeType": "gp3",
+          "AvailabilityZone": {
+            "Ref": "AvailabilityZone"
+          },
+          "Iops": 1000
+        },
+        "Metadata": {
+        }
+      },
+      "disk2": {
+        "Type": "AWS::EC2::Volume",
+        "Properties": {
+          "Tags": [
+            {
+              "Key": "Name",
+              "Value": {
+                "Fn::Join": [
+                  "",
+                  [
+                    {
+                      "Ref": "AWS::StackName"
+                    },
+                    "-disk2"
+                  ]
+                ]
+              }
+            }
+          ],
+          "Size": 30,
+          "VolumeType": "gp3",
+          "AvailabilityZone": {
+            "Ref": "AvailabilityZone"
+          },
+          "Iops": 1000
+        },
+        "Metadata": {
+        }
+      },
+      "PrimaryDNSRecord": {
+        "Type": "AWS::Route53::RecordSet",
+        "Properties": {
+          "HostedZoneId": "Z22IFTP89RRJMU",
+          "Name": {
+            "Fn::Join": [
+              "",
+              [
+                { "Ref": "AWS::StackName" },
+                "-rw.myapp.local."
+              ]
+            ]
+          },
+          "Type": "A",
+          "TTL": "300",
+          "ResourceRecords": [
+            {
+              "Fn::GetAtt": ["PsqlServer", "PrivateIp"]
+            }
+          ]
+        }
+      },
+      "ReadOnlyDNSRecord": {
+        "Type": "AWS::Route53::RecordSet",
+        "Condition": "ConditionsDeployRO",
+        "Properties": {
+          "HostedZoneId": "Z22IFTP89RRJMU",
+          "Name": {
+            "Fn::Join": [
+              "",
+              [
+                { "Ref": "AWS::StackName" },
+                "-ro.myapp.local."
+              ]
+            ]
+          },
+          "Type": "A",
+          "TTL": "300",
+          "ResourceRecords": [
+            {
+              "Fn::GetAtt": ["PsqlServerRO", "PrivateIp"]
+            }
+          ]
+        }
+      }        
+    },
+    "Metadata": {
+    },
+    "Outputs": {
+      "PsqlServerRWIP": {
+        "Description": "Private ip of rw master",
+        "Value": {
+          "Fn::GetAtt": [
+            "PsqlServer",
+            "PrivateIp"
+          ]
+        }
+      },
+      "PsqlServerROIP": {
+        "Condition":"ConditionsDeployRO",
+        "Description": "Private ip of ro replica",
+        "Value": {
+          "Fn::GetAtt": [
+            "PsqlServerRO",
+            "PrivateIp"
+          ]
+        }
+       }
+        
+    }
+  }
+  

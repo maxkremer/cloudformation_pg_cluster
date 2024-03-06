@@ -14,6 +14,8 @@ The motivation behind this project is to create containerless Postgres cluster w
 
 This project focuses on two instance types, the r5a and i3en this does not preclude you from using other instance types and sizes. The r5a is a general purpose memory optimized instance good for ingestion and batch processing workloads. The i3en which will serve as our read replica (via PostGreSQL streaming replication) is good at fast IO and performs OLAP workloads very quickly on large datasets. [Read more about how setting instance specific postgresql.conf parameters are accomplished in Cloudformation](cf-pg-configs/README.md).
 
+> **Note:** When launching instances make sure to pair the instance sizes accordingly. `large` primary means `large` replica, `xlarge` with `xlarge`, `2xl` with `2xl`, etc.
+
 #### The Memory Optimized r5a instance types (Read/Write Primary)
 https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/instance-store-volumes.html#instance-store-vol-mo
 

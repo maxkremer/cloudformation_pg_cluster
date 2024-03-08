@@ -1,6 +1,8 @@
 # Cloudformation Script for creating PostgreSQL Clusters
 
-This project is aimed at turnkey deployment of PostgreSQL clusters on the AWS cloud. It uses [AWS Cloudformation](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/stacks.html) to create "Stack" by defining the Postgres Primary, Replica and related resources. Things like instance type, AV zone, DB password and keypair are parameterized so they can be set at run time. This implies you can parameterize much more than I have depending your needs. This is intended to be a starting point.
+This project is aimed at turnkey deployment of PostgreSQL clusters on the AWS cloud. It uses [AWS Cloudformation](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/stacks.html) to create "Stack" by defining the Postgres Primary, Replica (optional) and related resources. Things like instance type, AV zone, DB password and keypair are parameterized so they can be set at run time. This implies you can parameterize much more than I have depending your needs. This is intended to be a starting point.
+
+In its simplest deployment this you can select `None` for the ec2 instance type of the replica and a single database instance will be created
 
 ## Motivation
 
@@ -8,7 +10,7 @@ The motivation behind this project is to create containerless Postgres cluster w
 
 #### More on motivation:
 
-[HERE](https://medium.com/@mkremer_75412/why-postgres-rds-didnt-work-for-us-and-why-it-won-t-work-for-you-if-you-re-implementing-a-big-6c4fff5a8644) and HERE
+[HERE](https://medium.com/@mkremer_75412/why-postgres-rds-didnt-work-for-us-and-why-it-won-t-work-for-you-if-you-re-implementing-a-big-6c4fff5a8644) and [HERE])(https://medium.com/@mkremer_75412/how-to-replicate-postgres-rds-functionality-with-a-few-scripts-and-a-cloudformation-template-748c391fce51)
 
 ## EC2 Instances and Tuning postgresql.conf
 
